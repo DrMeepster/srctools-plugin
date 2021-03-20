@@ -1855,7 +1855,7 @@ class FGD:
                         )
                     ) from None
 
-    def sorted_ents(self) -> Iterator[EntityDef]:
+    def sorted_ents(self, unevaluated_bases:bool = False) -> Iterator[EntityDef]:
         """Yield all entities in sorted order.
 
         This ensures only all bases for an entity are yielded before the entity.
@@ -1871,10 +1871,13 @@ class FGD:
                 ready = True
                 for base in ent.bases:
                     if isinstance(base, str):
-                        raise ValueError(
-                            'Unevaluated base: {} in {}!'.format(
-                                base, ent.classname
-                            ))
+                        if unevaluated_bases:
+                            continue
+                        else:
+                            raise ValueError(
+                                'Unevaluated base: {} in {}!'.format(
+                                    base, ent.classname
+                                ))
                     if base not in done:
                         deferred.add(ent)
                         deferred.add(base)
@@ -1948,7 +1951,7 @@ class FGD:
     def export(self) -> str: ...
     @overload
     def export(self, file: TextIO) -> None: ...
-    def export(self, file=None):
+    def export(self, file=None, unevaluated_bases: bool = True):
         """Write the FGD contents into a text file.
 
         If none are provided, the text will be returned.
@@ -2017,8 +2020,7 @@ class FGD:
                 )
             todo = deferred
 
-        for ent in self.sorted_ents():
-            file.write('\n')
+        for ent in self.sorted_ents(unevaluated_bases):
             ent.export(file)
 
         if ret_string:
