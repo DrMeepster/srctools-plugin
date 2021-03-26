@@ -36,34 +36,25 @@ def write_fgd(game: Game, fgds: List[str]) -> None:
         print("Note: 'srctools_fgdfix.fgd' not set as FGD in your gameinfo")
 
 def main(argv: List[str]) -> None:
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--chaos",
-        action="store_true",
-    )
-
-    parser.add_argument(
-        "--set-fgd",
-        action="store_true",
+    parser = argparse.ArgumentParser(
+        description="Generates a new FGD based on the contents of your hammer configuration."
     )
 
     parser.add_argument(
         "--config",
+        help="Specifies the config to use if there are more than one. Case insensitive."
     )
 
     parser.add_argument(
         "game",
+        "The game folder. Set to $gamedir in hammer."
     )
 
     result = parser.parse_args(argv)
 
     game = Game(result.game)
 
-    if result.chaos:
-        raise RuntimeError("P2CE/Chaos Engine support not added yet")
-    else:
-        gc = find_gameconfig(game)
+    gc = find_gameconfig(game)
 
     configs = gc.find_key("Configs").find_key("Games")
 
