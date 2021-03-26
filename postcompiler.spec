@@ -24,7 +24,7 @@ DATAS = [
 ]
 print(DATAS)
 
-a = Analysis(
+a_post = Analysis(
     ['srctools/scripts/postcompiler.py'],
     binaries=[],
     datas=DATAS,
@@ -42,10 +42,21 @@ a = Analysis(
     noarchive=False
 )
 
-pyz = PYZ(a.pure, a.zipped_data)
-exe = EXE(
-    pyz,
-    a.scripts,
+a_fgd = Analysis(
+    ['srctools/scripts/fgdfix.py'],
+    binaries=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    noarchive=False
+)
+
+MERGE((a_post, 'postcompiler', 'postcompiler'), (a_fgd, 'fgdfix', 'fgdfix'))
+
+pyz_post = PYZ(a_post.pure, a_post.zipped_data)
+exe_post = EXE(
+    pyz_post,
+    a_post.scripts,
     [],
     exclude_binaries=True,
     name='postcompiler',
@@ -56,12 +67,36 @@ exe = EXE(
     console=True,
     icon="postcompiler.ico",
 )
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+coll_post = COLLECT(
+    exe_post,
+    a_post.binaries,
+    a_post.zipfiles,
+    a_post.datas,
     strip=False,
     upx=True,
     name='postcompiler'
+)
+
+pyz_fgd = PYZ(a_fgd.pure, a_fgd.zipped_data)
+exe_fgd = EXE(
+    pyz_fgd,
+    a_fgd.scripts,
+    [],
+    exclude_binaries=True,
+    name='fgdfix',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+    icon="postcompiler.ico",
+)
+coll_fgd = COLLECT(
+    exe_fgd,
+    a_fgd.binaries,
+    a_fgd.zipfiles,
+    a_fgd.datas,
+    strip=False,
+    upx=True,
+    name='fgdfix'
 )
