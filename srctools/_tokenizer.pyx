@@ -8,7 +8,6 @@ cdef extern from *:
     unicode PyUnicode_FromStringAndSize(const char *u, Py_ssize_t size)
     unicode PyUnicode_FromKindAndData(int kind, const void *buffer, Py_ssize_t size)
 
-# On Python 3.6+, convert stuff to PathLike.
 cdef object os_fspath
 from os import fspath as os_fspath
 
@@ -36,9 +35,6 @@ cdef:
     object BRACE_OPEN = Token.BRACE_OPEN
     object BRACE_CLOSE = Token.BRACE_CLOSE
 
-    # Iterator that immediately raises StopIteration.
-    object EMPTY_ITER = iter('')
-
     # Reuse a single tuple for these, since the value is constant.
     tuple EOF_TUP = (Token.EOF, '')
     tuple NEWLINE_TUP = (Token.NEWLINE, '\n')
@@ -58,6 +54,14 @@ cdef:
 # Convert to tuple to only check the chars.
 DEF BARE_DISALLOWED = tuple('"\'{};:[]()\n\t ')
 
+# Controls what syntax is allowed
+DEF FL_STRING_BRACKETS     = 0b0001
+DEF FL_ALLOW_ESCAPES       = 0b0010
+DEF FL_ALLOW_STAR_COMMENTS = 0b0100
+# If set, the file_iter is a bound read() method.
+DEF FL_FILE_INPUT          = 0b1000
+
+DEF FILE_BUFFER = 1024
 
 # noinspection PyMissingTypeHints
 cdef class BaseTokenizer:
@@ -70,7 +74,7 @@ cdef class BaseTokenizer:
     # Class to call when errors occur..
     cdef object error_type
 
-    cdef public str filename
+    cdef str filename
 
     cdef object pushback_tok
     cdef object pushback_val
@@ -80,8 +84,17 @@ cdef class BaseTokenizer:
     def __init__(self, filename, error):
         # Use os method to convert to string.
         # We know this isn't a method, so skip Cython's optimisation.
-        with cython.optimize.unpack_method_calls(False):
-            self.filename = os_fspath(filename)
+        if filename is not None:
+            with cython.optimize.unpack_method_calls(False):
+                fname = os_fspath(filename)
+            if isinstance(fname, bytes):
+                # We only use this for display, so if bytes convert.
+                # Call repr() then strip the b'', so we get the
+                # automatic escaping of unprintable characters.
+                fname = (<str>repr(fname))[2:-1]
+            self.filename = str(fname)
+        else:
+            self.filename = None
 
         if error is None:
             self.error_type = TokenSyntaxError
@@ -101,6 +114,38 @@ cdef class BaseTokenizer:
         There is also the issue with recreating the C/Python versions.
         """
         raise TypeError('Cannot pickle Tokenizers!')
+
+    @property
+    def filename(self):
+        """Retrieve the filename used in error messages."""
+        return self.filename
+
+    @filename.setter
+    def filename(self, fname):
+        """Change the filename used in error messages."""
+        if fname is None:
+            self.filename = None
+        else:
+            with cython.optimize.unpack_method_calls(False):
+                fname = os_fspath(fname)
+            if isinstance(fname, bytes):
+                # We only use this for display, so if bytes convert.
+                # Call repr() then strip the b'', so we get the
+                # automatic escaping of unprintable characters.
+                fname = (<str> repr(fname))[2:-1]
+            self.filename = str(fname)
+
+    @property
+    def error_type(self):
+        """Return the TokenSyntaxError subclass raised when errors occur."""
+        return self.error_type
+    
+    @error_type.setter
+    def error_type(self, value):
+        """Alter the TokenSyntaxError subclass raised when errors occur."""
+        if not issubclass(value, TokenSyntaxError):
+            raise TypeError(f'The error type must be a TokenSyntaxError subclass, not {type(value).__name__}!.')
+        self.error_type = value
 
     def error(self, message, *args):
         """Raise a syntax error exception.
@@ -267,9 +312,7 @@ cdef class Tokenizer(BaseTokenizer):
     cdef object chunk_iter
     cdef int char_index # Position inside cur_chunk
 
-    cdef public bint string_bracket
-    cdef public bint allow_escapes
-    cdef public bint allow_star_comments
+    cdef int flags
 
     # Private buffer, to hold string parts we're constructing.
     # Tokenizers are expected to be temporary, so we just never shrink.
@@ -278,9 +321,11 @@ cdef class Tokenizer(BaseTokenizer):
     cdef Py_UCS4* val_buffer
 
     def __cinit__(self):
-        self.val_buffer = <Py_UCS4 *>PyMem_Malloc(32 * sizeof(Py_UCS4))
-        self.buf_size = 32
+        self.buf_size = 128
+        self.val_buffer = <Py_UCS4 *>PyMem_Malloc(self.buf_size * sizeof(Py_UCS4))
         self.buf_pos = 0
+        if self.val_buffer is NULL:
+            raise MemoryError
 
     def __dealloc__(self):
         PyMem_Free(self.val_buffer)
@@ -300,17 +345,31 @@ cdef class Tokenizer(BaseTokenizer):
                 'Cannot parse binary data! Decode to the desired encoding, '
                 'or wrap in io.TextIOWrapper() to decode gradually.'
             )
+            
+        self.flags = (
+            FL_STRING_BRACKETS * string_bracket |
+            FL_ALLOW_ESCAPES * allow_escapes |
+            FL_ALLOW_STAR_COMMENTS * allow_star_comments |
+            0
+        )
 
         # For direct strings, we can immediately assign that as our chunk,
-        # and then set the iterable to an empty iterator.
+        # and then set the iterable to indicate EOF after that.
         if isinstance(data, str):
             self.cur_chunk = data
-            self.chunk_iter = EMPTY_ITER
+            self.chunk_iter = None
         else:
             # The first next_char() call will pull out a chunk.
             self.cur_chunk = ''
-            # This checks that it is indeed iterable.
-            self.chunk_iter = iter(data)
+            
+            # If a file, use the read method to pull bulk data.
+            try:
+                self.chunk_iter = data.read
+            except AttributeError:
+                # This checks that it is indeed iterable.
+                self.chunk_iter = iter(data)
+            else:
+                self.flags |= FL_FILE_INPUT
 
         # We initially add one, so it'll be 0 next.
         self.char_index = -1
@@ -324,28 +383,80 @@ cdef class Tokenizer(BaseTokenizer):
             except AttributeError:
                 # If not, a Falsey filename means nothing is added to any
                 # KV exception message.
-                filename = ''
+                filename = None
 
         BaseTokenizer.__init__(self, filename, error)
-
-        self.string_bracket = string_bracket
-        self.allow_escapes = allow_escapes
-        self.allow_star_comments = allow_star_comments
-
+        
+    @property
+    def string_bracket(self) -> bool:
+        """Check if [bracket] blocks are parsed as a single string-like block.
+        
+        If disabled these are parsed as BRACK_OPEN, STRING, BRACK_CLOSE.
+        """
+        return self.flags & FL_STRING_BRACKETS != 0
+        
+        
+    @string_bracket.setter
+    def string_bracket(self, bint value) -> None:
+        """Set if [bracket] blocks are parsed as a single string-like block.
+        
+        If disabled these are parsed as BRACK_OPEN, STRING, BRACK_CLOSE.
+        """
+        if value:
+            self.flags |= FL_STRING_BRACKETS
+        else:
+            self.flags &= ~FL_STRING_BRACKETS
+            
+    @property
+    def allow_escapes(self) -> bool:
+        """Check if backslash escapes will be parsed."""
+        return self.flags & FL_ALLOW_ESCAPES != 0
+        
+        
+    @allow_escapes.setter
+    def allow_escapes(self, bint value) -> None:
+        """Set if backslash escapes will be parsed."""
+        if value:
+            self.flags |= FL_ALLOW_ESCAPES
+        else:
+            self.flags &= ~FL_ALLOW_ESCAPES
+            
+    @property
+    def allow_star_comments(self) -> bool:
+        """Check if /**/ style comments will be enabled."""
+        return self.flags & FL_ALLOW_STAR_COMMENTS != 0
+        
+        
+    @allow_star_comments.setter
+    def allow_star_comments(self, bint value) -> None:
+        """Set if /**/ style comments are enabled."""
+        if value:
+            self.flags |= FL_ALLOW_STAR_COMMENTS
+        else:
+            self.flags &= ~FL_ALLOW_STAR_COMMENTS
 
     cdef inline void buf_reset(self):
         """Reset the temporary buffer."""
         # Don't bother resizing or clearing, the next append will overwrite.
         self.buf_pos = 0
 
-    cdef inline void buf_add_char(self, Py_UCS4 uchar):
+    cdef inline int buf_add_char(self, Py_UCS4 uchar) except -1:
         """Add a character to the temporary buffer, reallocating if needed."""
+        # Temp, so if memory alloc failure occurs we're still in a valid state.
+        cdef Py_UCS4 *newbuf
+        cdef Py_ssize_t new_size
         if self.buf_pos >= self.buf_size:
-            self.buf_size *= 2
-            self.val_buffer = <Py_UCS4 *>PyMem_Realloc(
+            new_size = self.buf_size * 2
+            new_buf = <Py_UCS4 *>PyMem_Realloc(
                 self.val_buffer,
-                self.buf_size * sizeof(Py_UCS4),
+                new_size * sizeof(Py_UCS4),
             )
+            if new_buf:
+                self.buf_size = new_size
+                self.val_buffer = new_buf
+            else:
+                raise MemoryError
+
         self.val_buffer[self.buf_pos] = uchar
         self.buf_pos += 1
 
@@ -368,6 +479,19 @@ cdef class Tokenizer(BaseTokenizer):
         self.char_index += 1
         if self.char_index < len(self.cur_chunk):
             return self.cur_chunk[self.char_index]
+            
+        if self.chunk_iter is None:
+            return -1  # EOF
+            
+        if self.flags & FL_FILE_INPUT:
+            self.cur_chunk = <str?>self.chunk_iter(FILE_BUFFER)
+            self.char_index = 0
+
+            if len(self.cur_chunk) > 0:
+                return (self.cur_chunk)[0]
+            else:
+                self.chunk_iter = None
+                return -1
 
         # Retrieve a chunk from the iterable.
         try:
@@ -398,6 +522,7 @@ cdef class Tokenizer(BaseTokenizer):
                 raise self._error("Could not decode file!") from exc
             if chunk_obj is None:
                 # Out of characters after empty chunks
+                self.chunk_iter = None
                 return -1
 
             if isinstance(chunk_obj, bytes):
@@ -452,7 +577,7 @@ cdef class Tokenizer(BaseTokenizer):
                 # The next must be another slash! (//)
                 next_char = self._next_char()
                 if next_char == '*': # /* comment.
-                    if self.allow_star_comments:
+                    if self.flags & FL_ALLOW_STAR_COMMENTS:
                         start_line = self.line_num
                         while True:
                             next_char = self._next_char()
@@ -495,7 +620,7 @@ cdef class Tokenizer(BaseTokenizer):
                     raise self._error(
                         'Single slash found, '
                         'instead of two for a comment (// or /* */)!'
-                        if self.allow_star_comments else
+                        if self.flags & FL_ALLOW_STAR_COMMENTS else
                         'Single slash found, '
                         'instead of two for a comment (//)!'
                     )
@@ -511,7 +636,7 @@ cdef class Tokenizer(BaseTokenizer):
                         return STRING, self.buf_get_text()
                     elif next_char == '\n':
                         self.line_num += 1
-                    elif next_char == '\\' and self.allow_escapes:
+                    elif next_char == '\\' and self.flags & FL_ALLOW_ESCAPES:
                         # Escape text
                         escape_char = self._next_char()
                         if escape_char == -1:
@@ -537,7 +662,7 @@ cdef class Tokenizer(BaseTokenizer):
 
             elif next_char == '[':
                 # FGDs use [] for grouping, Properties use it for flags.
-                if not self.string_bracket:
+                if not self.flags & FL_STRING_BRACKETS:
                     return BRACK_OPEN_TUP
 
                 self.buf_reset()
@@ -557,7 +682,7 @@ cdef class Tokenizer(BaseTokenizer):
                     self.buf_add_char(next_char)
 
             elif next_char == ']':
-                if self.string_bracket:
+                if self.flags & FL_STRING_BRACKETS:
                     # If string_bracket is set (using PROP_FLAG), this is a
                     # syntax error - we don't have an open one to close!
                     raise self._error('No open [] to close with "]"!')
@@ -778,6 +903,8 @@ def escape_text(str text not None: str) -> str:
     cdef int i = 0
     try:
         out_buff = <char *>PyMem_Malloc(final_len+1)
+        if out_buff is NULL:
+            raise MemoryError
         for byt_letter in enc_text:
             if byt_letter == b'\\':
                 out_buff[i] = b'\\'

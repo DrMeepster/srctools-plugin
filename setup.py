@@ -13,10 +13,10 @@ if BUILD_EXT:
         print('Cython not installed, not compiling Cython modules.')
         c_ext = '.c'
         cpp_ext = '.cpp'
-        def cythonize(mod):
+        def cythonize(mod, **kwargs):
             return mod
 else:
-    def cythonize(mod):
+    def cythonize(mod, **kwargs):
         return []
     c_ext = cpp_ext = ''
 
@@ -50,6 +50,8 @@ setup(
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3 :: Only',
     ],
     packages=find_packages(include=['srctools', 'srctools.*']),
@@ -58,7 +60,9 @@ setup(
         Extension(
             "srctools._tokenizer",
             sources=["srctools/_tokenizer" + c_ext],
-            # extra_compile_args=['/FAs'],  # MS ASM dump
+            extra_compile_args=[
+                # '/FAs',  # MS ASM dump
+            ],
         ),
         Extension(
             "srctools._cy_vtf_readwrite",
@@ -68,15 +72,21 @@ setup(
                 "srctools/_cy_vtf_readwrite" + cpp_ext,
             ] + SQUISH_CPP,
             extra_compile_args=[
-                '/openmp' if WIN else '-fopenmp',
+                '/openmp',
                  # '/FAs',  # MS ASM dump
+            ] if WIN else [
+                '-fopenmp',
             ],
             extra_link_args=['/openmp' if WIN else '-fopenmp'],
         ),
         Extension(
             "srctools._math",
             sources=["srctools/_math" + c_ext],
-            # extra_compile_args=['/FAs'],  # MS ASM dump
+            extra_compile_args=[
+                # '/FAs',  # MS ASM dump
+            ] if WIN else [
+
+            ],
         ),
     ]),
 
